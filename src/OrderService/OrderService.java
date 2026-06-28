@@ -28,6 +28,8 @@ public class OrderService {
     private static HttpServer server;
     private static int port;
     private static String iscsBase;
+    private static final int CONNECT_TIMEOUT_MS = 2000;
+    private static final int READ_TIMEOUT_MS = 8000;
     private static final AtomicBoolean firstGateDone = new AtomicBoolean(false);
 
     // In-memory order store (allowed unless spec says otherwise)
@@ -50,7 +52,7 @@ public class OrderService {
         server.createContext("/product", new ProxyHandler());
         server.createContext("/order", new OrderHandler());
 
-        server.setExecutor(Executors.newCachedThreadPool());
+        server.setExecutor(Executors.newFixedThreadPool(40));
         server.start();
 
         System.out.println("OrderService running on port " + port);
@@ -331,10 +333,11 @@ public class OrderService {
         JsonObject o = new JsonObject();
         o.addProperty("status", status);
         byte[] b = GSON.toJson(o).getBytes(StandardCharsets.UTF_8);
-        ex.getResponseHeaders().set("Content-Type", "application/json");
+        ex.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
         ex.sendResponseHeaders(code, b.length);
-        ex.getResponseBody().write(b);
-        ex.close();
+        try (OutputStream os = ex.getResponseBody()) {
+            os.write(b);
+        }
     }
 
     private static void respondSuccess(HttpExchange ex, int userId, int productId, int qty) throws IOException {
@@ -345,10 +348,11 @@ public class OrderService {
         o.addProperty("status", "Success");
 
         byte[] b = GSON.toJson(o).getBytes(StandardCharsets.UTF_8);
-        ex.getResponseHeaders().set("Content-Type", "application/json");
+        ex.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
         ex.sendResponseHeaders(200, b.length);
-        ex.getResponseBody().write(b);
-        ex.close();
+        try (OutputStream os = ex.getResponseBody()) {
+            os.write(b);
+        }
     }
 
     static class HttpResult {
@@ -361,33 +365,32 @@ public class OrderService {
             throws IOException {
 
         HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
-        conn.setRequestMethod(method);
-        conn.setRequestProperty("Accept", "application/json");
+        try {
+            conn.setRequestMethod(method);
+            conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            conn.setReadTimeout(READ_TIMEOUT_MS);
+            conn.setRequestProperty("Accept", "application/json");
 
-        String ct = ex.getRequestHeaders().getFirst("Content-Type");
-        if (ct != null) conn.setRequestProperty("Content-Type", ct);
+            String ct = ex.getRequestHeaders().getFirst("Content-Type");
+            if (ct != null) conn.setRequestProperty("Content-Type", ct);
 
-        if ("POST".equals(method)) {
-            conn.setDoOutput(true);
-            if (body != null) conn.getOutputStream().write(body);
+            if ("POST".equals(method)) {
+                conn.setDoOutput(true);
+                byte[] payload = body == null ? new byte[0] : body;
+                conn.setFixedLengthStreamingMode(payload.length);
+                try (OutputStream os = conn.getOutputStream()) {
+                    os.write(payload);
+                }
+            }
+
+            int code = conn.getResponseCode();
+            InputStream is = (code >= 400) ? conn.getErrorStream() : conn.getInputStream();
+            byte[] resp = (is == null) ? new byte[0] : readAll(is);
+
+            return new HttpResult(code, resp);
+        } finally {
+            conn.disconnect();
         }
-
-        int code = conn.getResponseCode();
-        InputStream is = (code >= 400) ? conn.getErrorStream() : conn.getInputStream();
-        byte[] resp = (is == null) ? new byte[0] : readAll(is);
-
-        return new HttpResult(code, resp);
-    }
-
-    private static JsonObject parseJson(HttpExchange ex) throws IOException {
-        byte[] b = readAll(ex.getRequestBody());
-        if (b.length == 0) throw new RuntimeException("Empty body");
-        return JsonParser.parseString(new String(b, StandardCharsets.UTF_8)).getAsJsonObject();
-    }
-
-    private static int getInt(JsonObject o, String k) {
-        if (!o.has(k)) throw new RuntimeException("Missing field: " + k);
-        return o.get(k).getAsInt();
     }
 
     private static byte[] readAll(InputStream is) throws IOException {
@@ -400,17 +403,19 @@ public class OrderService {
 
     private static void sendJson(HttpExchange ex, int code, JsonObject obj) throws IOException {
         byte[] b = GSON.toJson(obj).getBytes(StandardCharsets.UTF_8);
-        ex.getResponseHeaders().set("Content-Type", "application/json");
+        ex.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
         ex.sendResponseHeaders(code, b.length);
-        ex.getResponseBody().write(b);
-        ex.close();
+        try (OutputStream os = ex.getResponseBody()) {
+            os.write(b);
+        }
     }
 
     private static void sendRaw(HttpExchange ex, int code, byte[] body) throws IOException {
-        ex.getResponseHeaders().set("Content-Type", "application/json");
+        ex.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
         ex.sendResponseHeaders(code, body.length);
-        ex.getResponseBody().write(body);
-        ex.close();
+        try (OutputStream os = ex.getResponseBody()) {
+            os.write(body);
+        }
     }
 
     private static void sendError(HttpExchange ex, int code, String msg) throws IOException {

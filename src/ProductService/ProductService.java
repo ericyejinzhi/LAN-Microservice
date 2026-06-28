@@ -20,6 +20,7 @@ public class ProductService {
 
     // IMPORTANT: UserService.java uses 8081. Avoid collision.
     private static final int PORT = 8082;
+    private static final com.google.gson.Gson GSON = new com.google.gson.Gson();
 
     private static HttpServer server; // NEW
 
@@ -127,17 +128,11 @@ public class ProductService {
         int port = PORT; // default port (8082)
         String ip = "127.0.0.1"; // default IP
 
-        server = HttpServer.create(new InetSocketAddress(ip, port), 0); // CHANGED
-        server.setExecutor(Executors.newFixedThreadPool(20));
-        server.createContext("/product", new ProductHandler());
-        server.start();
-
         // Load config from file if provided
         if (args.length > 0) {
             try {
                 String configContent = new String(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(args[0])), StandardCharsets.UTF_8);
-                com.google.gson.Gson gson = new com.google.gson.Gson();
-                com.google.gson.JsonObject config = gson.fromJson(configContent, com.google.gson.JsonObject.class);
+                com.google.gson.JsonObject config = GSON.fromJson(configContent, com.google.gson.JsonObject.class);
                 com.google.gson.JsonObject productConfig = config.getAsJsonObject("ProductService");
                 if (productConfig != null) {
                     if (productConfig.has("port")) {
@@ -153,7 +148,7 @@ public class ProductService {
             }
         }
 
-        HttpServer server = HttpServer.create(new InetSocketAddress(ip, port), 0);
+        server = HttpServer.create(new InetSocketAddress(ip, port), 0);
         server.setExecutor(Executors.newFixedThreadPool(20));
         server.createContext("/product", new ProductHandler());
         server.start();
@@ -439,7 +434,7 @@ public class ProductService {
     private static String jName(JsonObject o) {
         String n = jString(o, "name");
         if (n != null) return n;
-        return jString(o, "name"); // backward-compatible fallback
+        return jString(o, "productname"); // backward-compatible fallback
     }
 
 }

@@ -12,8 +12,6 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
-import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -21,10 +19,10 @@ import java.util.regex.Pattern;
 import java.sql.SQLException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.nio.charset.StandardCharsets;
 
 public class UserService {
 
+    private static final Gson GSON = new Gson();
     private static HttpServer server;
 
     public static void main(String[] args) throws IOException {
@@ -34,17 +32,11 @@ public class UserService {
         int port = 8081; // default port
         String ip = "127.0.0.1"; // default IP
 
-        server = HttpServer.create(new InetSocketAddress(ip, port), 0); // CHANGED
-        server.setExecutor(Executors.newFixedThreadPool(20));
-        server.createContext("/user", new UserHandler());
-        server.start();
-
         // Load config from file if provided
         if (args.length > 0) {
             try {
                 String configContent = new String(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(args[0])), StandardCharsets.UTF_8);
-                Gson gson = new Gson();
-                com.google.gson.JsonObject config = gson.fromJson(configContent, com.google.gson.JsonObject.class);
+                com.google.gson.JsonObject config = GSON.fromJson(configContent, com.google.gson.JsonObject.class);
                 com.google.gson.JsonObject userConfig = config.getAsJsonObject("UserService");
                 if (userConfig != null) {
                     if (userConfig.has("port")) {
@@ -60,7 +52,7 @@ public class UserService {
             }
         }
 
-        HttpServer server = HttpServer.create(new InetSocketAddress(ip, port), 0);
+        server = HttpServer.create(new InetSocketAddress(ip, port), 0);
         server.setExecutor(Executors.newFixedThreadPool(20));
 
         server.createContext("/user", new UserHandler());
@@ -100,8 +92,7 @@ public class UserService {
             try {
                 // Read and Parse JSON
                 String body = getRequestBody(exchange);
-                Gson gson = new Gson();
-                UserData user = gson.fromJson(body, UserData.class);
+                UserData user = GSON.fromJson(body, UserData.class);
                 if (user == null) {
                         sendResponse(exchange, 400, "{}"); // empty request body
                         return;
@@ -137,7 +128,7 @@ public class UserService {
                         UserDatabaseManager.createUser(user.id, user.username, user.email, user.password);
                         // CHANGE: Return the user object as JSON instead of a text string
                         user.command = null;
-                        String jsonResponse = gson.toJson(user); 
+                        String jsonResponse = GSON.toJson(user); 
                         sendResponse(exchange, 200, jsonResponse);
                         break;
                         
@@ -190,7 +181,7 @@ public class UserService {
                         UserDatabaseManager.updateUser(existingUser.id, existingUser.username, existingUser.email, existingUser.password);
 
                         // 6. Return the MERGED object so the client sees the full updated state
-                        sendResponse(exchange, 200, gson.toJson(existingUser));
+                        sendResponse(exchange, 200, GSON.toJson(existingUser));
                         break;
                         
                     case "delete":
@@ -232,7 +223,7 @@ public class UserService {
                 }
             } catch (SQLException e) {
                 // SQLite throws specific messages for constraint violations
-                if ("23505".equals(e.getSQLState()) || e.getMessage().contains("duplicate key")) {
+                if (isUniqueConstraint(e)) {
                     sendResponse(exchange, 409, "{}"); // duplicate user
                 } else {
                     e.printStackTrace();
@@ -265,9 +256,7 @@ public class UserService {
                 UserData user = convertToUserData(UserDatabaseManager.getUser(id));
 
                 if (user != null) {
-                    Gson gson = new Gson();
-                    
-                    String jsonResponse = gson.toJson(user);
+                    String jsonResponse = GSON.toJson(user);
                     exchange.getResponseHeaders().set("Content-Type", "application/json");
                     sendResponse(exchange, 200, jsonResponse);
                 } else {
@@ -295,9 +284,11 @@ public class UserService {
     }
 
     private static void sendResponse(HttpExchange exchange, int statusCode, String response ) throws IOException {
-        exchange.sendResponseHeaders(statusCode, response.length());
+        byte[] bytes = response.getBytes(StandardCharsets.UTF_8);
+        exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
+        exchange.sendResponseHeaders(statusCode, bytes.length);
         try (OutputStream os = exchange.getResponseBody()) {
-            os.write(response.getBytes(StandardCharsets.UTF_8));
+            os.write(bytes);
         }
     }
 
@@ -310,21 +301,6 @@ public class UserService {
             }
             return requestBody.toString();
         }
-    }
-
-    // Parses "id=1&name=bob" into a Map
-    private static Map<String, String> parseQuery(String query) {
-        Map<String, String> result = new HashMap<>();
-        if (query == null) return result;
-        for (String param : query.split("&")) {
-            String[] entry = param.split("=");
-            if (entry.length > 1) {
-                result.put(entry[0], entry[1]);
-            } else {
-                result.put(entry[0], "");
-            }
-        }
-        return result;
     }
 
     public static String hashPassword(String password) {
@@ -353,6 +329,17 @@ public class UserService {
     public static boolean isValidEmail(String emailStr) {
         Matcher matcher = VALID_EMAIL_ADDRESS_REGEX.matcher(emailStr);
         return matcher.matches();
+    }
+
+    private static boolean isUniqueConstraint(SQLException e) {
+        String state = e.getSQLState();
+        String message = e.getMessage();
+        return "23505".equals(state)
+                || e.getErrorCode() == 19
+                || (message != null && (
+                        message.toLowerCase().contains("duplicate key")
+                                || message.toLowerCase().contains("unique constraint")
+                ));
     }
 
     // --- USER DATA CLASS ---

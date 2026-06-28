@@ -3,7 +3,6 @@ package ISCS;
 import com.sun.net.httpserver.HttpServer;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpExchange;
-import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
@@ -25,6 +24,8 @@ public class ISCS {
     
     // Round-Robin Counters
     private static final Map<String, AtomicInteger> rrCounters = new HashMap<>();
+    private static final int CONNECT_TIMEOUT_MS = 2000;
+    private static final int READ_TIMEOUT_MS = 8000;
 
     public static void main(String[] args) throws IOException {
         if (args.length != 1) {
@@ -67,7 +68,7 @@ public class ISCS {
         server.createContext("/", new RouterHandler());
 
         // Use a thread pool to handle multiple requests (A2 scalability)
-        server.setExecutor(java.util.concurrent.Executors.newCachedThreadPool());
+        server.setExecutor(java.util.concurrent.Executors.newFixedThreadPool(40));
         server.start();
         
         System.out.println(">>> ISCS Listening on port " + port);
@@ -157,8 +158,9 @@ public class ISCS {
                 URL url = new URL(targetUrl);
                 connection = (HttpURLConnection) url.openConnection();
                 connection.setRequestMethod(method);
+                connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+                connection.setReadTimeout(READ_TIMEOUT_MS);
                 connection.setInstanceFollowRedirects(false);
-                connection.setDoOutput(true); // Allow sending body
 
                 // Forward Headers (skip specific ones that might cause issues)
                 for (Map.Entry<String, List<String>> header : exchange.getRequestHeaders().entrySet()) {
@@ -171,10 +173,12 @@ public class ISCS {
                 }
 
                 // Forward Body (if exists)
-                if (exchange.getRequestBody().available() > 0 || "POST".equals(method)) {
-                    try (InputStream clientBody = exchange.getRequestBody();
-                         OutputStream targetBody = connection.getOutputStream()) {
-                        copyStream(clientBody, targetBody);
+                if (allowsRequestBody(method)) {
+                    byte[] requestBody = readAll(exchange.getRequestBody());
+                    connection.setDoOutput(true);
+                    connection.setFixedLengthStreamingMode(requestBody.length);
+                    try (OutputStream targetBody = connection.getOutputStream()) {
+                        targetBody.write(requestBody);
                     }
                 }
 
@@ -188,15 +192,17 @@ public class ISCS {
 
                 byte[] responseBytes;
                 if (targetResponseStream != null) {
-                    ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-                    copyStream(targetResponseStream, buffer);
-                    responseBytes = buffer.toByteArray();
+                    responseBytes = readAll(targetResponseStream);
                 } else {
                     responseBytes = new byte[0];
                 }
 
                 // --- 6. SEND BACK TO ORIGIN (Order Service) ---
-                exchange.getResponseHeaders().add("Content-Type", "application/json");
+                String contentType = connection.getHeaderField("Content-Type");
+                exchange.getResponseHeaders().set(
+                        "Content-Type",
+                        contentType == null ? "application/json; charset=utf-8" : contentType
+                );
                 exchange.sendResponseHeaders(responseCode, responseBytes.length);
                 try (OutputStream os = exchange.getResponseBody()) {
                     os.write(responseBytes);
@@ -218,12 +224,22 @@ public class ISCS {
         if (nodes == null || nodes.isEmpty()) return null;
 
         AtomicInteger counter = rrCounters.get(serviceName);
-        // Round Robin Math
-        int index = counter.getAndIncrement() % nodes.size();
-        // Handle overflow (unlikely but safe)
-        if (index < 0) index = Math.abs(index);
+        int index = Math.floorMod(counter.getAndIncrement(), nodes.size());
         
         return nodes.get(index);
+    }
+
+    private static boolean allowsRequestBody(String method) {
+        return "POST".equalsIgnoreCase(method)
+                || "PUT".equalsIgnoreCase(method)
+                || "PATCH".equalsIgnoreCase(method)
+                || "DELETE".equalsIgnoreCase(method);
+    }
+
+    private static byte[] readAll(InputStream input) throws IOException {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        copyStream(input, output);
+        return output.toByteArray();
     }
 
     private static void copyStream(InputStream input, OutputStream output) throws IOException {
